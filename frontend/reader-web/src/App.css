@@ -1,0 +1,90 @@
+:root {
+  --bg-color: #f4f4f4;
+  --reader-bg: #ffffff;
+  --text-color: #1a1a1a;
+  --border-color: #ddd;
+}
+
+/* Dark mode */
+[data-theme="dark"] {
+  --bg-color: #121212;
+  --reader-bg: #1e1e1e;
+  --text-color: #ffffff;
+  --border-color: #333;
+}
+
+/* Sepia mode */
+[data-theme="sepia"] {
+  --bg-color: #f1e7d0;
+  --reader-bg: #fbf0d9;
+  --text-color: #5b4636;
+  --border-color: #e0d2b8;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+}
+
+/* Full-screen app shell */
+.app-shell {
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  background-color: var(--bg-color);
+}
+
+
+/* Centered reader */
+.reader-container {
+  width: 100%;
+  max-width: 850px;
+  padding: 1.5rem 2rem;
+  background-color: var(--reader-bg);
+  box-sizing: border-box;
+}
+
+
+
+/* Header */
+.header {
+  position: sticky;
+  top: 0;
+  background-color: var(--reader-bg);
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+  z-index: 10;
+}
+
+/* Controls */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Reader text */
+.reader {
+  margin-top: 1.5rem;
+  line-height: 1.75;
+  font-size: 1.05rem;
+}
+
+.reader p {
+  margin-bottom: 1rem;
+}
+
+/* Buttons */
+button {
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+}
+
+/* Page input */
+input[type="number"] {
+  width: 70px;
+}
