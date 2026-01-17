@@ -2,18 +2,26 @@ import { useState, useEffect } from "react";
 import pdfjsLib from "./pdfWorker";
 import "./App.css";
 
-type Paragraph = {
+type Sentence = {
+  id: number;
   text: string;
 };
+
 
 function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
-  const [paragraphs, setParagraphs] = useState<Paragraph[]>([]);
+  const [sentences, setSentences] = useState<Sentence[]>([]);
+  const [activeSentence, setActiveSentence] = useState<number | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechRate, setSpeechRate] = useState(1);
+  const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(null);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+
 
   
   /* ===============================
@@ -85,16 +93,28 @@ function App() {
     setLoading(false);
   };
 
+  const splitIntoSentences = (lines: string[]): Sentence[] => {
+  let id = 0;
+
+  return lines
+    .flatMap((line) =>
+      line.split(/(?<=[.!?])\s+/)
+    )
+    .map((text) => ({
+      id: id++,
+      text: text.trim(),
+    }))
+    .filter((s) => s.text.length > 0);
+  };
+
   /* ===============================
      Render Readable Text
      =============================== */
   const renderReadableText = (lines: string[]) => {
-    setParagraphs(
-      lines
-        .map((l) => ({ text: l.replace(/\s+/g, " ").trim() }))
-        .filter((p) => p.text.length > 0)
-    );
-  };
+    const sentenceList = splitIntoSentences(lines);
+    setSentences(sentenceList);
+    setActiveSentence(null);
+};
 
   /* ===============================
      Navigation
@@ -102,13 +122,59 @@ function App() {
   const goToPage = async (page: number) => {
     if (!pdfDoc || page < 1 || page > totalPages) return;
     setCurrentPage(page);
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
     await extractTextFromPage(pdfDoc, page);
   };
 
   //theme
   const [theme, setTheme] = useState<"light" | "dark" | "sepia">(() => {
   return (localStorage.getItem("theme") as "light" | "dark" | "sepia") || "light";
-});
+  });
+  //voice
+  const speakSentence = (index: number) => {
+    if (!sentences[index]) return;
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(sentences[index].text);
+
+    utterance.rate = speechRate;
+    if (selectedVoice) utterance.voice = selectedVoice;
+
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+      setActiveSentence(index);
+    };
+
+    utterance.onend = () => {
+      const next = index + 1;
+      if (next < sentences.length) {
+        speakSentence(next);
+      } else {
+        setIsSpeaking(false);
+      }
+    }; 
+
+    window.speechSynthesis.speak(utterance);
+  };
+  const play = () => {
+    const startIndex = activeSentence ?? 0;
+    speakSentence(startIndex);
+  };
+  const pause = () => {
+    window.speechSynthesis.pause();
+    setIsSpeaking(false);
+  };
+  const resume = () => {
+    window.speechSynthesis.resume();
+    setIsSpeaking(true);
+  };
+  const stop = () => {
+  window.speechSynthesis.cancel();
+  setIsSpeaking(false);
+  };
+
 
   useEffect(() => {
   document.body.setAttribute("data-theme", theme);
@@ -131,6 +197,63 @@ const [lineSpacing, setLineSpacing] = useState<number>(() => {
 useEffect(() => {
   localStorage.setItem("lineSpacing", lineSpacing.toString());
 }, [lineSpacing]);
+
+useEffect(() => {
+  if (activeSentence === null) return;
+
+  const el = document.getElementById(`sentence-${activeSentence}`);
+  el?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+}, [activeSentence]);
+
+useEffect(() => {
+  const handler = (e: KeyboardEvent) => {
+    if (activeSentence === null) return;
+
+    if (e.key === "ArrowRight") {
+      setActiveSentence((prev) =>
+        prev !== null && prev < sentences.length - 1 ? prev + 1 : prev
+      );
+    }
+
+    if (e.key === "ArrowLeft") {
+      setActiveSentence((prev) =>
+        prev !== null && prev > 0 ? prev - 1 : prev
+      );
+    }
+  };
+
+  window.addEventListener("keydown", handler);
+  return () => window.removeEventListener("keydown", handler);
+}, [activeSentence, sentences.length]);
+
+useEffect(() => {
+  const loadVoices = () => {
+    const available = window.speechSynthesis.getVoices();
+    setVoices(available);
+    setSelectedVoice(available.find(v => v.lang.startsWith("en")) || available[0]);
+  };
+
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+}, []);
+
+useEffect(() => {
+  return () => {
+    window.speechSynthesis.cancel();
+  };
+}, []);
+useEffect(() => {
+  if (isSpeaking && activeSentence !== null) {
+    window.speechSynthesis.cancel();
+    speakSentence(activeSentence);
+  }
+}, [speechRate, selectedVoice]);
+
+
+
 
 
 
@@ -211,6 +334,46 @@ return (
             onChange={(e) => setLineSpacing(Number(e.target.value))}
           />
       </div>
+
+      <div className="controls">
+        {!isSpeaking ? (
+          <button onClick={play}>▶ Play</button>
+          ) : (
+            <button onClick={pause}>⏸ Pause</button>
+            )}
+            <button onClick={resume}>⏯ Resume</button>
+            <button onClick={stop}>⏹ Stop</button>
+      </div>
+
+      <div className="controls">
+        <span>Voice:</span>
+        <select
+        onChange={(e) =>
+          setSelectedVoice(voices.find(v => v.name === e.target.value) || null)
+        }
+        >
+        {voices.map((v) => (
+          <option key={v.name} value={v.name}>
+          {v.name} ({v.lang})
+          </option>
+        ))}
+        </select>
+      </div>
+      
+      <div className="controls">
+      <span>Speed:</span>
+      <input
+        type="range"
+        min="0.5"
+        max="2"
+        step="0.1"
+        value={speechRate}
+        onChange={(e) => setSpeechRate(Number(e.target.value))}
+      />
+      </div>
+
+
+
       {/* HEADER END */}
 
       {loading && <p>Loading page…</p>}
@@ -224,9 +387,23 @@ return (
     lineHeight: lineSpacing,
   }}
 >
-  {paragraphs.map((p, i) => (
-    <p key={i}>{p.text}</p>
+  {sentences.map((s) => (
+    <span
+      key={s.id}
+      id={`sentence-${s.id}`}
+      onClick={() => {setActiveSentence(s.id);speakSentence(s.id);}}
+      style={{
+        backgroundColor:
+          activeSentence === s.id
+            ? "rgba(255, 230, 150, 0.6)"
+            : "transparent",
+        cursor: "pointer",
+      }}
+    >
+      {s.text}{" "}
+    </span>
   ))}
+
 </div>
 
 

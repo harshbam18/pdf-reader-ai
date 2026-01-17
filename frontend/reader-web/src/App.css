@@ -88,3 +88,7 @@ button {
 input[type="number"] {
   width: 70px;
 }
+
+.reader span:hover {
+  background-color: rgba(200, 200, 200, 0.3);
+}
