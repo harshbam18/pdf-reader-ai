@@ -1,4 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  getSetting,
+  saveSetting,
+} from "../storage/indexedDb";
 
 type Sentence = {
   id: number;
@@ -17,27 +21,92 @@ export function useTTS({
   setActiveSentence,
 }: UseTTSProps) {
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [speechLocked, setSpeechLocked] = useState(false);
-  const [speechRate, setSpeechRate] = useState(1);
+  const speechLocked = useRef(false);
+  const narrationReady = useRef(false);
+  const [speechRate, setSpeechRate] = useState(
+    Number(localStorage.getItem("speechRate")) || 1
+  );
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(null);
+  const selectedVoiceName = useRef<string | null>(
+    localStorage.getItem("selectedVoiceName")
+  );
+  const initialSpeechRate = useRef(speechRate);
+  const speakSentenceRef = useRef<(index: number) => void>(() => {});
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadNarrationSettings = async () => {
+      const [
+        savedVoiceName,
+        savedSpeechRate,
+      ] = await Promise.all([
+        getSetting<string | null>("selectedVoiceName", selectedVoiceName.current),
+        getSetting("speechRate", initialSpeechRate.current),
+      ]);
+
+      if (!mounted) return;
+
+      selectedVoiceName.current = savedVoiceName;
+      setSpeechRate(savedSpeechRate);
+      narrationReady.current = true;
+
+      const available = window.speechSynthesis.getVoices();
+      const preferredVoice =
+        available.find((v) => v.name === savedVoiceName);
+
+      if (preferredVoice) {
+        setSelectedVoice(preferredVoice);
+      }
+    };
+
+    loadNarrationSettings();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const loadVoices = () => {
       const available = window.speechSynthesis.getVoices();
+      const preferredVoice =
+        available.find((v) => v.name === selectedVoiceName.current);
+
       setVoices(available);
-      setSelectedVoice(available.find((v) => v.lang.startsWith("en")) || available[0] || null);
+      setSelectedVoice(
+        preferredVoice ||
+          available.find((v) => v.lang.startsWith("en")) ||
+          available[0] ||
+          null
+      );
     };
 
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
   }, []);
 
-  const speakSentence = (index: number) => {
-    if (!sentences[index]) return;
-    if (speechLocked) return;
+  useEffect(() => {
+    if (!narrationReady.current) return;
 
-    setSpeechLocked(true);
+    saveSetting("speechRate", speechRate);
+    localStorage.setItem("speechRate", speechRate.toString());
+  }, [speechRate]);
+
+  useEffect(() => {
+    if (!narrationReady.current || !selectedVoice) return;
+
+    selectedVoiceName.current = selectedVoice.name;
+    saveSetting("selectedVoiceName", selectedVoice.name);
+    localStorage.setItem("selectedVoiceName", selectedVoice.name);
+  }, [selectedVoice]);
+
+  const speakSentence = useCallback((index: number) => {
+    if (!sentences[index]) return;
+    if (speechLocked.current) return;
+
+    speechLocked.current = true;
 
     const freshVoices = window.speechSynthesis.getVoices();
     const validVoice =
@@ -58,26 +127,30 @@ export function useTTS({
     };
 
     utterance.onend = () => {
-      setSpeechLocked(false);
+      speechLocked.current = false;
 
       const next = index + 1;
       if (next < sentences.length) {
-        speakSentence(next);
+        speakSentenceRef.current(next);
       } else {
         setIsSpeaking(false);
       }
     };
 
     utterance.onerror = () => {
-      setSpeechLocked(false);
+      speechLocked.current = false;
       setIsSpeaking(false);
     };
 
     window.speechSynthesis.speak(utterance);
-  };
+  }, [selectedVoice?.name, sentences, setActiveSentence, speechRate]);
+
+  useEffect(() => {
+    speakSentenceRef.current = speakSentence;
+  }, [speakSentence]);
 
   const play = () => {
-    if (speechLocked) return;
+    if (speechLocked.current) return;
 
     window.speechSynthesis.cancel();
     const startIndex = activeSentence ?? 0;
@@ -86,7 +159,7 @@ export function useTTS({
 
   const pause = () => {
     window.speechSynthesis.pause();
-    setSpeechLocked(false);
+    speechLocked.current = false;
     setIsSpeaking(false);
   };
 
@@ -103,7 +176,7 @@ export function useTTS({
 
   const stop = () => {
     window.speechSynthesis.cancel();
-    setSpeechLocked(false);
+    speechLocked.current = false;
     setIsSpeaking(false);
   };
 
@@ -111,12 +184,12 @@ export function useTTS({
     if (!isSpeaking || activeSentence === null) return;
 
     window.speechSynthesis.cancel();
-    setSpeechLocked(false);
+    speechLocked.current = false;
 
     setTimeout(() => {
       speakSentence(activeSentence);
     }, 100);
-  }, [speechRate, selectedVoice]);
+  }, [activeSentence, isSpeaking, speakSentence, speechRate, selectedVoice]);
 
   useEffect(() => {
     return () => {
