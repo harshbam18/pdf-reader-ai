@@ -6,7 +6,7 @@ import {
 
 type Sentence = {
   id: number;
-  text: string;
+  text?: string;
 };
 
 type UseTTSProps = {
@@ -104,6 +104,15 @@ export function useTTS({
 
   const speakSentence = useCallback((index: number) => {
     if (!sentences[index]) return;
+    if (!sentences[index].text) {
+      const next = index + 1;
+
+      if (next < sentences.length) {
+        speakSentenceRef.current(next);
+      }
+
+      return;
+    }
     if (speechLocked.current) return;
 
     speechLocked.current = true;
