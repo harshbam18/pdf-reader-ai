@@ -54,10 +54,10 @@ export default function ReaderHeader({
         <div className="file-pill">
           <label>
             <Upload size={16} />
-            <span>Upload PDF</span>
+            <span>Upload</span>
             <input
               type="file"
-              accept="application/pdf"
+              accept="application/pdf,.txt,text/plain"
               onChange={handlePDFUpload}
             />
           </label>

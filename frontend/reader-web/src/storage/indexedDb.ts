@@ -158,6 +158,17 @@ export const getBook = async (
   return record?.book ?? null;
 };
 
+export const deleteBook = async (
+  id: string
+) => {
+  const stores = ["books", "bookmarks", "progress", "summaries", "annotations"];
+
+  for (const storeName of stores) {
+    const store = await getStore(storeName, "readwrite");
+    await requestToPromise(store.delete(id));
+  }
+};
+
 export const getLatestBookRecord = async () => {
   const store = await getStore("books", "readonly");
   const records = await requestToPromise<BookRecord[]>(

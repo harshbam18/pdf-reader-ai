@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect } from "react";
 import { useSettings } from "./hooks/useSettings";
 import { useTTS } from "./hooks/useTTS";
 import ReaderHeader from "./components/ReaderHeader";
+import Modal from "./components/Modal";
 import pdfjsLib from "./pdfWorker";
 import type {
   Book,
@@ -21,11 +22,13 @@ import {
   Play,
   SkipBack,
   SkipForward,
+  Trash2,
   Volume2,
 } from "lucide-react";
 import {
   type BookRecord,
   createBookId,
+  deleteBook,
   getAllBookRecords,
   getAnnotations,
   getBook,
@@ -72,6 +75,23 @@ function App() {
   const [sentenceNotes, setSentenceNotes] = useState<Record<number, string>>({});
   const [readingMode, setReadingMode] = useState<"compact" | "comfort" | "book">("comfort");
   const [showToolbar, setShowToolbar] = useState(true);
+  const [modalState, setModalState] = useState<{
+    isOpen: boolean;
+    type: "confirm" | "prompt";
+    title: string;
+    message: string;
+    onConfirm: (value?: string) => void;
+    defaultValue?: string;
+    placeholder?: string;
+    confirmText?: string;
+    cancelText?: string;
+  }>({
+    isOpen: false,
+    type: "confirm",
+    title: "",
+    message: "",
+    onConfirm: () => {},
+  });
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -181,6 +201,38 @@ function App() {
     saveSetting("currentBookId", bookId);
   }, []);
 
+  const handleDeleteBook = useCallback(async (
+    bookId: string
+  ) => {
+    setModalState({
+      isOpen: true,
+      type: "confirm",
+      title: "Delete Book",
+      message: "Are you sure you want to delete this book? This action cannot be undone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
+        try {
+          await deleteBook(bookId);
+
+          if (currentBookId === bookId) {
+            setCurrentBookId(null);
+            setBook(null);
+            setActiveSentence(null);
+            setView("library");
+            await saveSetting("currentBookId", null);
+          }
+
+          await refreshLibrary();
+        } catch {
+          setError("Failed to delete the book.");
+        }
+
+        setModalState((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  }, [currentBookId, refreshLibrary]);
+
   useEffect(() => {
     let mounted = true;
 
@@ -262,7 +314,7 @@ function App() {
 
   
   /* ===============================
-     PDF Upload
+     File Upload
      =============================== */
   const handlePDFUpload = async (
     e: React.ChangeEvent<HTMLInputElement>
@@ -274,10 +326,17 @@ function App() {
     setLoading(true);
 
     try {
-      const buffer = await file.arrayBuffer();
-      await loadPDFDocument(buffer, file.name);
+      if (file.type === "application/pdf") {
+        const buffer = await file.arrayBuffer();
+        await loadPDFDocument(buffer, file.name);
+      } else if (file.type === "text/plain" || file.name.endsWith(".txt")) {
+        const text = await file.text();
+        await loadTextDocument(text, file.name);
+      } else {
+        setError("Unsupported file type. Please upload a PDF or TXT file.");
+      }
     } catch {
-      setError("Failed to load PDF. Try another file.");
+      setError("Failed to load file. Try another file.");
     }
 
     setLoading(false);
@@ -300,51 +359,107 @@ function App() {
   };
 
   /* ===============================
+     Load Text File
+     =============================== */
+  const loadTextDocument = async (
+    content: string,
+    fileName: string
+  ) => {
+    const bookId = createBookId();
+    const title = fileName.replace(/\.(txt|TXT)$/, "");
+
+    setCurrentBookId(bookId);
+    setBook(null);
+    setActiveSentence(null);
+
+    const rawLines = content
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    await processBookContent(rawLines, title);
+  };
+
+  /* ===============================
      Extract Text
      =============================== */
-  const extractEntireBook = async (
-    pdf: PDFDocument,
+  const isTableOfContentsHeading = (text: string): boolean => {
+    const cleaned = text.trim().toLowerCase();
+    return cleaned === "table of contents" ||
+           cleaned === "contents" ||
+           cleaned === "toc";
+  };
+
+  const isSimpleChapterHeading = (text: string): boolean => {
+    return /^(chapter|part)\s+\d+$/i.test(text.trim());
+  };
+
+  const isDateLine = (text: string): boolean => {
+    const cleaned = text.trim();
+    // Check if it looks like a date (not in quotes)
+    // Matches patterns like: "28 June 1995", "June 28, 1995", "(Seven days after...)" etc.
+    const datePatterns = [
+      /^\d{1,2}\s+\w+\s+\d{4}$/,  // 28 June 1995
+      /^\w+\s+\d{1,2},?\s+\d{4}$/,  // June 28, 1995
+      /^\(\w+.*?\)$/,  // (Seven days after...)
+      /^[A-Z][a-z]+day,?\s+\w+\s+\d{1,2},?\s+\d{4}$/,  // Monday, June 28, 1995
+    ];
+
+    return datePatterns.some(pattern => pattern.test(cleaned));
+  };
+
+  const splitIntoSentences = (text: string): string[] => {
+    // Split on sentence boundaries (period/exclamation/question followed by space and capital letter)
+    // But preserve abbreviations like "Dr.", "Mr.", etc.
+    const sentences: string[] = [];
+    let current = "";
+
+    for (let i = 0; i < text.length; i++) {
+      current += text[i];
+
+      // Check for sentence end
+      if (/[.!?]/.test(text[i])) {
+        const nextChar = text[i + 1];
+        const nextNextChar = text[i + 2];
+
+        // End of sentence if:
+        // - followed by space and capital letter, or
+        // - followed by space and quote, or
+        // - at end of text
+        if (!nextChar ||
+            (nextChar === " " && (nextNextChar?.match(/[A-Z"']/))) ||
+            nextChar === "\n") {
+          current = current.trim();
+          if (current) {
+            sentences.push(current);
+          }
+          current = "";
+          i++; // skip the space
+        }
+      }
+    }
+
+    if (current.trim()) {
+      sentences.push(current.trim());
+    }
+
+    return sentences;
+  };
+
+  const processBookContent = async (
+    rawLines: string[],
     title: string
   ) => {
     setLoading(true);
     setError(null);
 
     try {
-      const rawLines: string[] = [];
-
-      for (
-        let pageNum = 1;
-        pageNum <= pdf.numPages;
-        pageNum++
-      ) {
-        const page = await pdf.getPage(pageNum);
-        const content = await page.getTextContent();
-
-        let buffer = "";
-
-        content.items.forEach((item) => {
-          const text = item.str.trim();
-
-          if (!text) return;
-
-          buffer += text + " ";
-
-          if (/[.!?]$/.test(text)) {
-            rawLines.push(buffer.trim());
-            buffer = "";
-          }
-        });
-
-        if (buffer.trim()) {
-          rawLines.push(buffer.trim());
-        }
-      }
-
       const chapters: Chapter[] = [];
       const sentences: Sentence[] = [];
 
       let currentChapter = 0;
       let sentenceIndex = 0;
+      let inTableOfContents = false;
 
       chapters.push({
         id: 0,
@@ -354,58 +469,160 @@ function App() {
       });
 
       rawLines.forEach((line) => {
-        if (isChapterHeading(line)) {
-          currentChapter++;
+        const isTOCHeading = isTableOfContentsHeading(line);
+        const isChapterLine = isChapterHeading(line);
+        const isSimpleChapter = isSimpleChapterHeading(line);
+        const isDate = isDateLine(line);
 
+        // When we find a TOC heading, mark it and create TOC chapter
+        if (isTOCHeading) {
+          inTableOfContents = true;
+          currentChapter++;
+          chapters.push({
+            id: currentChapter,
+            title: "Table of Contents",
+            startSentence: sentenceIndex,
+            endSentence: sentenceIndex,
+          });
+          return;
+        }
+
+        // While in TOC, only add SIMPLE chapter headings as sentences
+        if (inTableOfContents && isSimpleChapter) {
+          sentences.push({
+            id: sentenceIndex,
+            text: line,
+            chapterId: currentChapter,
+          });
+          sentenceIndex++;
+          return;
+        }
+
+        // Exit TOC when we hit anything that's not a simple chapter heading
+        if (inTableOfContents) {
+          inTableOfContents = false;
+        }
+
+        // Create chapters for chapter headings
+        if (isChapterLine) {
+          currentChapter++;
           chapters.push({
             id: currentChapter,
             title: line,
             startSentence: sentenceIndex,
             endSentence: sentenceIndex,
           });
-
           return;
         }
 
-        sentences.push({
-          id: sentenceIndex,
-          text: line,
-          chapterId: currentChapter,
-        });
+        // Handle date lines as special scene markers (centered)
+        if (isDate) {
+          sentences.push({
+            id: sentenceIndex,
+            text: `[SCENE_MARKER:${line}]`,
+            chapterId: currentChapter,
+          });
+          sentenceIndex++;
+          return;
+        }
 
-        sentenceIndex++;
+        // Split content into proper sentences
+        const sentenceList = splitIntoSentences(line);
+        sentenceList.forEach((sentence) => {
+          if (sentence.trim()) {
+            sentences.push({
+              id: sentenceIndex,
+              text: sentence,
+              chapterId: currentChapter,
+            });
+            sentenceIndex++;
+          }
+        });
       });
 
+      // Calculate chapter end sentences
       chapters.forEach((chapter, index) => {
-        const nextChapter =
-          chapters[index + 1];
-
-        chapter.endSentence =
-          nextChapter
-            ? nextChapter.startSentence - 1
-            : sentences.length - 1;
+        const nextChapter = chapters[index + 1];
+        chapter.endSentence = nextChapter
+          ? nextChapter.startSentence - 1
+          : sentences.length - 1;
       });
 
       const newBook: Book = {
         metadata: {
           title,
         },
-
         chapters,
-
         sentences,
-
         progress: 0,
-
         bookmarks: [],
-
         currentSentence: 0,
       };
 
       setBook(newBook);
     } catch {
-      setError("Unable to extract text from this book.");
+      setError("Unable to extract text from this file.");
     } finally {
+      setLoading(false);
+    }
+  };
+
+  /* ===============================
+     Extract PDF Text
+     =============================== */
+  const extractEntireBook = async (
+    pdf: PDFDocument,
+    title: string
+  ) => {
+    const rawLines: string[] = [];
+
+    try {
+      for (
+        let pageNum = 1;
+        pageNum <= pdf.numPages;
+        pageNum++
+      ) {
+        const page = await pdf.getPage(pageNum);
+        const content = await page.getTextContent();
+
+        let currentLineY: number | null = null;
+        let buffer = "";
+
+        (content.items as any[]).forEach((item) => {
+          const text = item.str?.trim() || "";
+          const itemY = Math.round(item.y);
+
+          // Detect line breaks based on y-coordinate changes
+          const isNewLine =
+            currentLineY !== null &&
+            Math.abs(itemY - currentLineY) > 5;
+
+          if (isNewLine && buffer.trim()) {
+            rawLines.push(buffer.trim());
+            buffer = "";
+          }
+
+          if (!text) return;
+
+          buffer += text + " ";
+          currentLineY = itemY;
+
+          // Also break on sentence endings
+          if (/[.!?]$/.test(text)) {
+            rawLines.push(buffer.trim());
+            buffer = "";
+            currentLineY = null;
+          }
+        });
+
+        if (buffer.trim()) {
+          rawLines.push(buffer.trim());
+        }
+      }
+
+      await processBookContent(rawLines, title);
+    } catch {
+      setError("Unable to extract text from this PDF.");
       setLoading(false);
     }
   };
@@ -462,27 +679,32 @@ function App() {
   };
 
   const editNote = (sentenceId: number) => {
-    const existingNote =
-      sentenceNotes[sentenceId] ?? "";
-    const note = window.prompt(
-      "Add a note for this sentence",
-      existingNote
-    );
+    const existingNote = sentenceNotes[sentenceId] ?? "";
 
-    if (note === null) return;
+    setModalState({
+      isOpen: true,
+      type: "prompt",
+      title: "Edit Note",
+      message: "Add or edit a note for this sentence:",
+      placeholder: "Type your note here...",
+      defaultValue: existingNote,
+      confirmText: "Save",
+      cancelText: "Cancel",
+      onConfirm: (note) => {
+        setSentenceNotes((prev) => {
+          const next = { ...prev };
 
-    setSentenceNotes((prev) => {
-      const next = {
-        ...prev,
-      };
+          if (note?.trim()) {
+            next[sentenceId] = note.trim();
+          } else {
+            delete next[sentenceId];
+          }
 
-      if (note.trim()) {
-        next[sentenceId] = note.trim();
-      } else {
-        delete next[sentenceId];
-      }
+          return next;
+        });
 
-      return next;
+        setModalState((prev) => ({ ...prev, isOpen: false }));
+      },
     });
   };
 
@@ -671,7 +893,7 @@ return (
 
       <div className="chapter-list">
 
-        {book?.chapters.map((chapter) => (
+        {view === "reader" && book?.chapters.map((chapter) => (
           <button
             key={chapter.id}
             className={
@@ -762,14 +984,6 @@ return (
               <p className="sidebar-kicker">Personal Library</p>
               <h1>Books</h1>
             </div>
-            <label className="empty-upload">
-              Upload PDF
-              <input
-                type="file"
-                accept="application/pdf"
-                onChange={handlePDFUpload}
-              />
-            </label>
           </div>
 
           {libraryBooks.length === 0 && !loading && (
@@ -779,10 +993,10 @@ return (
               </div>
               <h1>Your library is empty</h1>
               <label className="empty-upload">
-                Upload PDF
+                Upload File
                 <input
                   type="file"
-                  accept="application/pdf"
+                  accept="application/pdf,.txt,text/plain"
                   onChange={handlePDFUpload}
                 />
               </label>
@@ -821,12 +1035,24 @@ return (
                   <p className="library-date">
                     Last opened {new Date(record.updatedAt).toLocaleDateString()}
                   </p>
-                  <button
-                    className="resume-button"
-                    onClick={() => openBook(record.id, record.book)}
-                  >
-                    Resume reading
-                  </button>
+                  <div className="library-card-actions">
+                    <button
+                      className="resume-button"
+                      onClick={() => openBook(record.id, record.book)}
+                    >
+                      Resume reading
+                    </button>
+                    <button
+                      className="delete-button"
+                      title="Delete book"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteBook(record.id);
+                      }}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
               </article>
             ))}
@@ -842,14 +1068,7 @@ return (
               <BookOpenText size={42} />
             </div>
             <h1>Open a book</h1>
-            <label className="empty-upload">
-              Upload PDF
-              <input
-                type="file"
-                accept="application/pdf"
-                onChange={handlePDFUpload}
-              />
-            </label>
+            <p className="empty-reader-subtitle">Use the upload button in the toolbar to add a book</p>
           </div>
         )}
 
@@ -869,6 +1088,11 @@ return (
                   c.startSentence === s.id
               );
 
+            const isSceneMarker = s.text.startsWith("[SCENE_MARKER:");
+            const sceneDate = isSceneMarker
+              ? s.text.replace("[SCENE_MARKER:", "").replace("]", "")
+              : null;
+
             return (
               <div key={s.id}>
 
@@ -878,35 +1102,43 @@ return (
                   </h2>
                 )}
 
-                <span
-                  id={`sentence-${s.id}`}
-                  className={[
-                    activeSentence === s.id
-                      ? "active-sentence"
-                      : "",
-                    highlightedSentences.includes(s.id)
-                      ? "highlighted-sentence"
-                      : "",
-                    book.bookmarks.includes(s.id)
-                      ? "bookmarked-sentence"
-                      : "",
-                  ].filter(Boolean).join(" ")}
-                  onClick={() =>
-                    navigateSentence(s.id)
-                  }
-                  onMouseEnter={() =>
-                    setHoveredSentence(s.id)
-                  }
-                  onMouseLeave={() =>
-                    setHoveredSentence(null)
-                  }
-                >
-                  {s.text}{" "}
-                  {(hoveredSentence === s.id ||
-                    book.bookmarks.includes(s.id) ||
-                    highlightedSentences.includes(s.id) ||
-                    sentenceNotes[s.id]) && (
-                    <span className="sentence-tools">
+                {isSceneMarker ? (
+                  <div
+                    id={`sentence-${s.id}`}
+                    className="scene-marker"
+                  >
+                    {sceneDate}
+                  </div>
+                ) : (
+                  <span
+                    id={`sentence-${s.id}`}
+                    className={[
+                      activeSentence === s.id
+                        ? "active-sentence"
+                        : "",
+                      highlightedSentences.includes(s.id)
+                        ? "highlighted-sentence"
+                        : "",
+                      book.bookmarks.includes(s.id)
+                        ? "bookmarked-sentence"
+                        : "",
+                    ].filter(Boolean).join(" ")}
+                    onClick={() =>
+                      navigateSentence(s.id)
+                    }
+                    onMouseEnter={() =>
+                      setHoveredSentence(s.id)
+                    }
+                    onMouseLeave={() =>
+                      setHoveredSentence(null)
+                    }
+                  >
+                    {s.text}{" "}
+                    {(hoveredSentence === s.id ||
+                      book.bookmarks.includes(s.id) ||
+                      highlightedSentences.includes(s.id) ||
+                      sentenceNotes[s.id]) && (
+                      <span className="sentence-tools">
                       <button
                         title="Bookmark sentence"
                         className={
@@ -952,8 +1184,9 @@ return (
                     </span>
                   )}
                 </span>
+                )}
 
-                {sentenceNotes[s.id] && (
+                {!isSceneMarker && sentenceNotes[s.id] && (
                   <button
                     className="sentence-note"
                     onClick={() => editNote(s.id)}
@@ -1050,6 +1283,23 @@ return (
       )}
 
     </main>
+
+    <Modal
+      isOpen={modalState.isOpen}
+      type={modalState.type}
+      title={modalState.title}
+      message={modalState.message}
+      placeholder={modalState.placeholder}
+      defaultValue={modalState.defaultValue}
+      confirmText={modalState.confirmText}
+      cancelText={modalState.cancelText}
+      onConfirm={(value) => {
+        modalState.onConfirm(value);
+      }}
+      onCancel={() => {
+        setModalState((prev) => ({ ...prev, isOpen: false }));
+      }}
+    />
   </div>
 );
 }
